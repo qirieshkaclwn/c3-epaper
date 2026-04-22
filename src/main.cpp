@@ -45,7 +45,7 @@ class BLEScanCallback : public NimBLEAdvertisedDeviceCallbacks {
 uint16_t scanBLEDevices() {
     bleDeviceCount = 0;
     
-    NimBLEDevice::init("");
+    NimBLEDevice::init("epaper-clock");
     NimBLEScan* pBLEScan = NimBLEDevice::getScan();
     
     BLEScanCallback* pCallback = new BLEScanCallback();
