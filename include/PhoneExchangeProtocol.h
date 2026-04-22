@@ -2,7 +2,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-
 #include <vector>
 
 struct PhoneExchangeData {
@@ -58,7 +57,7 @@ public:
     static constexpr uint8_t kFieldTrack = 0x10;
     static constexpr uint8_t kAllFieldMask = kFieldUnixTime | kFieldVpn | kFieldPlayback | kFieldArtist | kFieldTrack;
 
-    // Теги payload (документация пользователя)
+    // Теги payload 
     static constexpr uint8_t kTagUnixTime = 0x01;
     static constexpr uint8_t kTagVpn = 0x02;
     static constexpr uint8_t kTagPlayback = 0x03;
