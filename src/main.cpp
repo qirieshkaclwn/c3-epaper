@@ -3,7 +3,9 @@
 #include <GxEPD2_BW.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include "time.h"
-#include <NimBLEDevice.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
 #include <cstring>
 #include <string>
 
@@ -19,7 +21,7 @@
 // ===== НАСТРОЙКИ BLE (под Android-клиент) =====
 static constexpr const char* SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
 static constexpr const char* CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
-static constexpr uint32_t BLE_WAIT_FOR_PHONE_MS = 15000;
+static constexpr uint32_t BLE_WAIT_FOR_PHONE_MS = 50000;
 static constexpr uint64_t SLEEP_INTERVAL_US = 60ULL * 1000000ULL;
 
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(GxEPD2_154_D67(7, 9, 2, 0));
@@ -32,33 +34,42 @@ RTC_DATA_ATTR bool cachedHasUnixTime = false;
 static volatile bool gBleConnected = false;
 static volatile bool gTimeUpdated = false;
 
-class ClockServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* pServer) override {
+class ClockServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) override {
         (void)pServer;
         gBleConnected = true;
+        Serial.println("📱 Client connected!");
     }
 
-    void onDisconnect(NimBLEServer* pServer) override {
+    void onDisconnect(BLEServer* pServer) override {
         (void)pServer;
         gBleConnected = false;
+        Serial.println("📱 Client disconnected");
+        pServer->startAdvertising();
     }
 };
 
-class ClockCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pCharacteristic) override {
-        const std::string value = pCharacteristic->getValue();
+class ClockCharacteristicCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* pCharacteristic) override {
+        std::string value = pCharacteristic->getValue();
+        Serial.printf("📝 Received %d bytes:\n", value.size());
+        
         if (value.size() != 8) {
+            Serial.printf("❌ Wrong size! Expected 8\n");
             return;
         }
 
         uint64_t unixMillis = 0;
         for (size_t i = 0; i < 8; ++i) {
-            unixMillis = (unixMillis << 8) | static_cast<uint8_t>(value[i]);
+            uint8_t byte = static_cast<uint8_t>(value[i]);
+            unixMillis = (unixMillis << 8) | byte;
+            Serial.printf("   [%d] = 0x%02X\n", i, byte);
         }
 
         cachedUnixTime = static_cast<uint32_t>(unixMillis / 1000ULL);
         cachedHasUnixTime = true;
         gTimeUpdated = true;
+        Serial.printf("✅ Time set to: %lu seconds\n", cachedUnixTime);
     }
 };
 
@@ -87,34 +98,56 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     gBleConnected = false;
     gTimeUpdated = false;
 
-    NimBLEDevice::init("esp32-clock");
-    NimBLEServer* server = NimBLEDevice::createServer();
+    Serial.println("\n=== BLE Initialization ===");
+    BLEDevice::init("esp32-clock");
+    BLEDevice::setPower(ESP_PWR_LVL_P9);
+
+    BLEServer* server = BLEDevice::createServer();
     if (server == nullptr) {
-        NimBLEDevice::deinit();
+        Serial.println("❌ Failed to create BLE server");
+        BLEDevice::deinit();
         return false;
     }
     server->setCallbacks(&gServerCallbacks);
 
-    NimBLEService* service = server->createService(SERVICE_UUID);
+    BLEService* service = server->createService(SERVICE_UUID);
     if (service == nullptr) {
-        NimBLEDevice::deinit();
+        Serial.println("❌ Failed to create BLE service");
+        BLEDevice::deinit();
         return false;
     }
 
-    NimBLECharacteristic* characteristic = service->createCharacteristic(
+    BLECharacteristic* characteristic = service->createCharacteristic(
         CHARACTERISTIC_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
     if (characteristic == nullptr) {
-        NimBLEDevice::deinit();
+        Serial.println("❌ Failed to create characteristic");
+        BLEDevice::deinit();
         return false;
     }
+
     characteristic->setCallbacks(&gCharacteristicCallbacks);
     characteristic->setValue("clock");
-    service->start();
+    
+    BLEDescriptor* descriptor = new BLEDescriptor(BLEUUID((uint16_t)0x2902));
+    descriptor->setValue((uint8_t*)"\x01\x00", 2);
+    characteristic->addDescriptor(descriptor);
 
-    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-    advertising->addServiceUUID(SERVICE_UUID);
+    service->start();
+    delay(500);
+
+    server->getAdvertising()->addServiceUUID(SERVICE_UUID);
+    BLEAdvertising* advertising = BLEDevice::getAdvertising();
+    advertising->setScanResponse(true);
+    advertising->setMinPreferred(0x06);
+    advertising->setMaxPreferred(0x12);
     advertising->start();
+
+    Serial.println("✅ BLE Server initialized and advertising...");
+    Serial.printf("Service UUID: %s\n", SERVICE_UUID);
+    Serial.printf("Characteristic UUID: %s\n", CHARACTERISTIC_UUID);
+    Serial.printf("Device Name: esp32-clock\n");
+    Serial.printf("Waiting for time (timeout: %lu ms)...\n\n", BLE_WAIT_FOR_PHONE_MS);
 
     const uint32_t waitStart = millis();
     while ((millis() - waitStart) < BLE_WAIT_FOR_PHONE_MS) {
@@ -122,15 +155,22 @@ static bool waitForPhoneTime(bool& outWasConnected) {
             outWasConnected = true;
         }
         if (gTimeUpdated) {
+            Serial.println("\n⏰ Time received! Waiting for client to disconnect...");
+            uint32_t disconnectWait = millis();
+            while ((millis() - disconnectWait) < 2000) {
+                delay(50);
+            }
+            Serial.println("Stopping BLE...");
             advertising->stop();
-            NimBLEDevice::deinit();
+            BLEDevice::deinit();
             return true;
         }
         delay(20);
     }
 
+    Serial.printf("\n⏱️ BLE timeout (%lu ms), stopping...\n", BLE_WAIT_FOR_PHONE_MS);
     advertising->stop();
-    NimBLEDevice::deinit();
+    BLEDevice::deinit();
     return false;
 }
 
@@ -172,7 +212,9 @@ void setup() {
 
     unsigned long startMillis = millis();
     Serial.begin(115200);
-    bootCount++;
+    delay(100);
+    Serial.println("\n\n========== ESP32 CLOCK ==========");
+    Serial.printf("Boot number: %d\n", bootCount++);
 
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
@@ -230,8 +272,10 @@ void setup() {
     digitalWrite(EPD_POWER_PIN, LOW);
 
     esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US);
+    Serial.println("\nGoing to deep sleep for 60 seconds...\n");
     esp_deep_sleep_start();
 }
 
 void loop() {
 }
+
