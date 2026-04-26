@@ -64,7 +64,15 @@ Wait Timeout:        15 секунд (15000 мс)
 3. **Обнаружение характеристики**
    - UUID: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
 
-### Фаза 3: Передача времени (сторона телефона)
+### Фаза 3: Запрос данных от ESP32 (REQUEST)
+
+После подключения ESP32 отправляет в эту же характеристику BLE `notify`-сообщение с `REQUEST`-payload
+(теги `kTagRequestTime`, `kTagRequestVpn`, `kTagRequestPlayback`, `kTagRequestArtist`, `kTagRequestTrack`).
+
+Телефон должен подписаться на notifications характеристики и, получив REQUEST, отправить обратно `DATA`
+через `writeCharacteristic(...)` в формате протокола `PhoneExchangeProtocol`.
+
+### Фаза 4: Передача данных (сторона телефона)
 
 **Отправляем текущее время в характеристику:**
 
@@ -111,7 +119,7 @@ Wait Timeout:        15 секунд (15000 мс)
    characteristic.writeValue(timeBytes)
 ```
 
-### Фаза 4: Обработка (сторона ESP32)
+### Фаза 5: Обработка (сторона ESP32)
 
 Функция `onWrite()` вызывается автоматически:
 
@@ -139,7 +147,7 @@ void onWrite(NimBLECharacteristic* pCharacteristic) override {
 }
 ```
 
-### Фаза 5: Завершение (сторона ESP32)
+### Фаза 6: Завершение (сторона ESP32)
 
 После получения времени:
 

@@ -35,7 +35,9 @@ RTC_DATA_ATTR bool cachedHasUnixTime = false;
 static volatile bool gBleConnected = false;
 static volatile bool gTimeUpdated = false;
 static PhoneExchangeFragmentAccumulator gFragmentAccumulator;
+static uint16_t gNextRequestMsgId = 1;
 
+// Callbacks BLE-сервера: отслеживаем подключение/отключение клиента.
 class ClockServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         (void)pServer;
@@ -51,6 +53,7 @@ class ClockServerCallbacks : public BLEServerCallbacks {
     }
 };
 
+// Callbacks BLE-характеристики: принимаем фрагменты и собираем полное сообщение.
 class ClockCharacteristicCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pCharacteristic) override {
         std::string value = pCharacteristic->getValue();
@@ -77,6 +80,7 @@ class ClockCharacteristicCallbacks : public BLECharacteristicCallbacks {
         }
         
         if (!completed) {
+            // Фрагмент принят, но сообщение ещё не собрано.
             Serial.println("⏳ Waiting for more fragments...");
             return;
         }
@@ -121,6 +125,43 @@ class ClockCharacteristicCallbacks : public BLECharacteristicCallbacks {
 static ClockServerCallbacks gServerCallbacks;
 static ClockCharacteristicCallbacks gCharacteristicCallbacks;
 
+// Отправляем REQUEST-сообщение телефону через notify.
+static bool sendPhoneDataRequest(BLECharacteristic* characteristic, uint16_t msgId) {
+    if (characteristic == nullptr) {
+        return false;
+    }
+
+    constexpr uint8_t requestMask = PhoneExchangeProtocol::kFieldUnixTime |
+                                    PhoneExchangeProtocol::kFieldVpn |
+                                    PhoneExchangeProtocol::kFieldPlayback |
+                                    PhoneExchangeProtocol::kFieldArtist |
+                                    PhoneExchangeProtocol::kFieldTrack;
+
+    std::vector<uint8_t> requestPayload;
+    if (!PhoneExchangeProtocol::encodeRequestPayload(requestMask, requestPayload)) {
+        return false;
+    }
+
+    // В проекте используем MTU до 512 байт.
+    constexpr uint16_t kSafePayloadMtu = 512;
+    std::vector<std::vector<uint8_t>> requestPackets;
+    if (!PhoneExchangeProtocol::fragmentPayload(requestPayload, msgId, true, kSafePayloadMtu, requestPackets)) {
+        return false;
+    }
+
+    for (std::vector<uint8_t>& packet : requestPackets) {
+        characteristic->setValue(packet.data(), packet.size());
+        characteristic->notify();
+        delay(10);
+    }
+
+    Serial.printf("📤 REQUEST sent (msgId=%u, packets=%u)\n",
+                  static_cast<unsigned>(msgId),
+                  static_cast<unsigned>(requestPackets.size()));
+    return true;
+}
+
+// Формируем строку времени для отрисовки на дисплее.
 static void formatCachedTime(char* out, size_t outSize) {
     if (outSize == 0) {
         return;
@@ -138,10 +179,12 @@ static void formatCachedTime(char* out, size_t outSize) {
     strftime(out, outSize, "%H:%M:%S", &tmInfo);
 }
 
+// Поднимаем BLE, ждём данные от телефона и останавливаем BLE по завершению/таймауту.
 static bool waitForPhoneTime(bool& outWasConnected) {
     outWasConnected = false;
     gBleConnected = false;
     gTimeUpdated = false;
+    PhoneExchangeProtocol::resetAccumulator(gFragmentAccumulator);
 
     Serial.println("\n=== BLE Initialization ===");
     BLEDevice::init("esp32-clock");
@@ -174,6 +217,7 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     characteristic->setCallbacks(&gCharacteristicCallbacks);
     characteristic->setValue("clock");
     
+    // CCCD descriptor нужен для совместимости с клиентами, ожидающими notify/indicate флаг.
     BLEDescriptor* descriptor = new BLEDescriptor(BLEUUID((uint16_t)0x2902));
     descriptor->setValue((uint8_t*)"\x01\x00", 2);
     characteristic->addDescriptor(descriptor);
@@ -194,12 +238,31 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     Serial.printf("Device Name: esp32-clock\n");
     Serial.printf("Waiting for time (timeout: %lu ms)...\n\n", BLE_WAIT_FOR_PHONE_MS);
 
+    // Основной цикл ожидания данных/подключения от телефона.
     const uint32_t waitStart = millis();
+    uint32_t lastRequestMs = 0;
+    bool requestSentAfterConnect = false;
+
     while ((millis() - waitStart) < BLE_WAIT_FOR_PHONE_MS) {
         if (gBleConnected) {
             outWasConnected = true;
+
+            // После подключения инициируем запрос данных, затем периодически повторяем до ответа.
+            const uint32_t nowMs = millis();
+            if (!requestSentAfterConnect || (nowMs - lastRequestMs) >= 2000) {
+                if (sendPhoneDataRequest(characteristic, gNextRequestMsgId++)) {
+                    requestSentAfterConnect = true;
+                    lastRequestMs = nowMs;
+                } else {
+                    Serial.println("❌ Failed to send data request");
+                }
+            }
+        } else {
+            requestSentAfterConnect = false;
         }
+
         if (gTimeUpdated) {
+            // Небольшая пауза, чтобы клиент успел завершить запись/отключение.
             Serial.println("\n⏰ Time received! Waiting for client to disconnect...");
             uint32_t disconnectWait = millis();
             while ((millis() - disconnectWait) < 2000) {
@@ -251,20 +314,24 @@ float readBatteryVoltage() {
 }
 
 void setup() {
+    // Включаем питание e-paper перед инициализацией SPI/дисплея.
     pinMode(EPD_POWER_PIN, OUTPUT);
     digitalWrite(EPD_POWER_PIN, HIGH); 
     delay(100); 
 
+    // Базовая инициализация UART и диагностики.
     unsigned long startMillis = millis();
     Serial.begin(115200);
     delay(100);
     Serial.println("\n\n========== ESP32 CLOCK ==========");
     Serial.printf("Boot number: %d\n", bootCount++);
 
+    // Настройка ADC для чтения батареи.
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
     pinMode(BAT_ADC_PIN, INPUT);
 
+    // Настройка SPI и шрифтового рендера для e-paper.
     SPI.begin(4, -1, 6, 7); 
     display.init(115200);
     u8g2Fonts.begin(display);
@@ -273,6 +340,7 @@ void setup() {
     u8g2Fonts.setBackgroundColor(GxEPD_WHITE);
     u8g2Fonts.setFontMode(1);
 
+    // Получаем телеметрию и, при возможности, обновляем время от телефона.
     float vbat = readBatteryVoltage();
     bool phoneConnected = false;
     const bool phoneDataUpdated = waitForPhoneTime(phoneConnected);
@@ -280,6 +348,7 @@ void setup() {
     char timeStr[16];
     formatCachedTime(timeStr, sizeof(timeStr));
     
+    // Одна полная перерисовка экрана с диагностической информацией.
     display.setFullWindow();
     display.firstPage();
     do {
@@ -309,6 +378,7 @@ void setup() {
         
     } while (display.nextPage());
 
+    // Переводим дисплей и связанные GPIO в минимальное потребление.
     display.hibernate();
     
     pinMode(4, INPUT); 
@@ -316,6 +386,7 @@ void setup() {
     pinMode(7, INPUT); 
     digitalWrite(EPD_POWER_PIN, LOW);
 
+    // Глубокий сон до следующего цикла обновления.
     esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US);
     Serial.println("\nGoing to deep sleep for 60 seconds...\n");
     esp_deep_sleep_start();
