@@ -8,6 +8,7 @@
 #include <BLEServer.h>
 #include <cstring>
 #include <string>
+#include "PhoneExchangeProtocol.h"
 
 #define EPD_POWER_PIN 1
 
@@ -33,6 +34,7 @@ RTC_DATA_ATTR bool cachedHasUnixTime = false;
 
 static volatile bool gBleConnected = false;
 static volatile bool gTimeUpdated = false;
+static PhoneExchangeFragmentAccumulator gFragmentAccumulator;
 
 class ClockServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
@@ -52,24 +54,67 @@ class ClockServerCallbacks : public BLEServerCallbacks {
 class ClockCharacteristicCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pCharacteristic) override {
         std::string value = pCharacteristic->getValue();
-        Serial.printf("📝 Received %d bytes:\n", value.size());
+        Serial.printf("📝 Received %d bytes\n", value.size());
         
-        if (value.size() != 8) {
-            Serial.printf("❌ Wrong size! Expected 8\n");
+        // Используем PhoneExchangeProtocol для обработки фрагментов
+        bool completed = false;
+        bool isRequest = false;
+        uint16_t msgId = 0;
+        std::vector<uint8_t> fullPayload;
+        
+        uint32_t nowMs = millis();
+        if (!PhoneExchangeProtocol::consumeFragment(
+            gFragmentAccumulator,
+            (const uint8_t*)value.data(),
+            value.size(),
+            nowMs,
+            completed,
+            isRequest,
+            msgId,
+            fullPayload)) {
+            Serial.println("❌ Fragment parsing failed");
             return;
         }
-
-        uint64_t unixMillis = 0;
-        for (size_t i = 0; i < 8; ++i) {
-            uint8_t byte = static_cast<uint8_t>(value[i]);
-            unixMillis = (unixMillis << 8) | byte;
-            Serial.printf("   [%d] = 0x%02X\n", i, byte);
+        
+        if (!completed) {
+            Serial.println("⏳ Waiting for more fragments...");
+            return;
         }
-
-        cachedUnixTime = static_cast<uint32_t>(unixMillis / 1000ULL);
-        cachedHasUnixTime = true;
-        gTimeUpdated = true;
-        Serial.printf("✅ Time set to: %lu seconds\n", cachedUnixTime);
+        
+        // Полное сообщение получено
+        if (isRequest) {
+            Serial.println("❌ Got REQUEST instead of DATA");
+            return;
+        }
+        
+        // Разбираем payload
+        PhoneExchangeData data;
+        if (!PhoneExchangeProtocol::decodeDataPayload(fullPayload.data(), fullPayload.size(), data)) {
+            Serial.println("❌ Data payload decoding failed");
+            return;
+        }
+        
+        // Обновляем время если оно пришло
+        if (data.hasUnixTime) {
+            cachedUnixTime = data.unixTime;
+            cachedHasUnixTime = true;
+            gTimeUpdated = true;
+            Serial.printf("✅ Time set to: %lu seconds\n", cachedUnixTime);
+        }
+        
+        // Логируем другие данные если они есть
+        if (data.hasVpn) {
+            Serial.printf("📡 VPN: %s\n", data.vpnConnected ? "connected" : "disconnected");
+        }
+        if (data.hasPlayback) {
+            Serial.printf("▶️ Playback: %s\n", data.playbackPlaying ? "playing" : "stopped");
+        }
+        if (data.hasArtist && data.artist.size() > 0) {
+            Serial.printf("🎤 Artist: %.*s\n", (int)data.artist.size(), (const char*)data.artist.data());
+        }
+        if (data.hasTrack && data.track.size() > 0) {
+            Serial.printf("🎵 Track: %.*s\n", (int)data.track.size(), (const char*)data.track.data());
+        }
     }
 };
 
@@ -119,7 +164,7 @@ static bool waitForPhoneTime(bool& outWasConnected) {
 
     BLECharacteristic* characteristic = service->createCharacteristic(
         CHARACTERISTIC_UUID,
-        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
     if (characteristic == nullptr) {
         Serial.println("❌ Failed to create characteristic");
         BLEDevice::deinit();
