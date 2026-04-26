@@ -63,11 +63,11 @@ public:
     static constexpr uint8_t kTagPlayback = 0x03;
     static constexpr uint8_t kTagArtist = 0x04;
     static constexpr uint8_t kTagTrack = 0x05;
-    static constexpr uint8_t kTagRequestTime = 0x10;
-    static constexpr uint8_t kTagRequestVpn = 0x11;
-    static constexpr uint8_t kTagRequestPlayback = 0x12;
-    static constexpr uint8_t kTagRequestArtist = 0x13;
-    static constexpr uint8_t kTagRequestTrack = 0x14;
+    static constexpr uint8_t kTagRequestTime = 0x11;
+    static constexpr uint8_t kTagRequestVpn = 0x12;
+    static constexpr uint8_t kTagRequestPlayback = 0x13;
+    static constexpr uint8_t kTagRequestArtist = 0x14;
+    static constexpr uint8_t kTagRequestTrack = 0x15;
 
     // Универсальный конструктор DATA payload с произвольным набором полей.
     static bool encodeDataPayload(const PhoneExchangeData& data, uint8_t fieldMask, std::vector<uint8_t>& outPayload);
