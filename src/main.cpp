@@ -42,7 +42,7 @@ class ClockServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
         (void)pServer;
         gBleConnected = true;
-        Serial.println("📱 Client connected!");
+        Serial.printf("📱 Client connected! Device MAC: %s\n", BLEDevice::getAddress().toString().c_str());
     }
 
     void onDisconnect(BLEServer* pServer) override {
@@ -189,6 +189,7 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     Serial.println("\n=== BLE Initialization ===");
     BLEDevice::init("esp32-clock");
     BLEDevice::setPower(ESP_PWR_LVL_P9);
+    Serial.printf("BLE MAC: %s\n", BLEDevice::getAddress().toString().c_str());
 
     BLEServer* server = BLEDevice::createServer();
     if (server == nullptr) {
