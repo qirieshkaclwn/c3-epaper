@@ -233,6 +233,8 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     advertising->setMaxPreferred(0x12);
     advertising->start();
 
+    Serial.print("ESP32 MAC: ");
+    Serial.println(BLEDevice::getAddress().toString().c_str());
     Serial.println("✅ BLE Server initialized and advertising...");
     Serial.printf("Service UUID: %s\n", SERVICE_UUID);
     Serial.printf("Characteristic UUID: %s\n", CHARACTERISTIC_UUID);
@@ -243,10 +245,26 @@ static bool waitForPhoneTime(bool& outWasConnected) {
     const uint32_t waitStart = millis();
     uint32_t lastRequestMs = 0;
     bool requestSentAfterConnect = false;
+    uint32_t connectTimeMs = 0;
+    bool initialDelayDone = false;
 
     while ((millis() - waitStart) < BLE_WAIT_FOR_PHONE_MS) {
         if (gBleConnected) {
             outWasConnected = true;
+
+            // Ждем 3 секунды для перестраховки
+            if (!initialDelayDone) {
+                if (connectTimeMs == 0) {
+                    connectTimeMs = millis();
+                    Serial.println("First connection, waiting 3s for client to enable notifications...");
+                }
+                if (millis() - connectTimeMs < 3000) {
+                    delay(50);
+                    continue;
+                }
+                initialDelayDone = true;
+                Serial.println("Initial delay done, starting requests");
+            }
 
             // После подключения инициируем запрос данных, затем периодически повторяем до ответа.
             const uint32_t nowMs = millis();
@@ -264,7 +282,7 @@ static bool waitForPhoneTime(bool& outWasConnected) {
 
         if (gTimeUpdated) {
             // Небольшая пауза, чтобы клиент успел завершить запись/отключение.
-            Serial.println("\n⏰ Time received! Waiting for client to disconnect...");
+            Serial.println("\n⏰ Data received! Waiting for client to disconnect...");
             uint32_t disconnectWait = millis();
             while ((millis() - disconnectWait) < 2000) {
                 delay(50);
